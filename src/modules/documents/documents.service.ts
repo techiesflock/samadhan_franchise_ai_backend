@@ -1,8 +1,11 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { v4 as uuidv4 } from 'uuid';
+import { DocumentEntity } from '../../entities/document.entity';
+import { FolderEntity } from '../../entities/folder.entity';
 import { IngestionService } from '../ingestion/ingestion.service';
 import { VectorService } from '../vector/vector.service';
 
@@ -15,6 +18,7 @@ export interface UploadedDocument {
   path: string;
   uploadedAt: Date;
   status: 'pending' | 'processing' | 'completed' | 'failed';
+  folderId?: string;
 }
 
 @Injectable()
@@ -23,9 +27,12 @@ export class DocumentsService {
   private readonly uploadDir: string;
   private readonly maxFileSize: number;
   private readonly allowedMimeTypes: string[];
-  private documents: Map<string, UploadedDocument> = new Map();
 
   constructor(
+    @InjectRepository(DocumentEntity)
+    private documentRepository: Repository<DocumentEntity>,
+    @InjectRepository(FolderEntity)
+    private folderRepository: Repository<FolderEntity>,
     private configService: ConfigService,
     private ingestionService: IngestionService,
     private vectorService: VectorService,
@@ -40,103 +47,9 @@ export class DocumentsService {
     try {
       await fs.mkdir(this.uploadDir, { recursive: true });
       this.logger.log(`Upload directory initialized: ${this.uploadDir}`);
-      
-      // Load existing documents from disk
-      await this.loadDocumentsFromDisk();
     } catch (error) {
       this.logger.error('Failed to create upload directory', error.stack);
     }
-  }
-
-  /**
-   * Load documents from uploads folder (recursively scans all subdirectories)
-   */
-  private async loadDocumentsFromDisk() {
-    try {
-      this.logger.log(`🔍 Scanning uploads folder recursively: ${this.uploadDir}`);
-      const allFiles = await this.getAllFilesRecursively(this.uploadDir);
-      
-      let loadedCount = 0;
-      
-      for (const filePath of allFiles) {
-        const fileName = path.basename(filePath);
-        const relativePath = path.relative(this.uploadDir, filePath);
-        
-        // Check if already in memory
-        const existingDoc = Array.from(this.documents.values()).find(
-          doc => doc.path === filePath
-        );
-        
-        if (!existingDoc) {
-          const stats = await fs.stat(filePath);
-          
-          // Generate unique ID from relative path
-          const uniqueId = relativePath.replace(/[\/\\]/g, '_').replace(/\.[^.]+$/, '');
-          
-          // Add to memory map
-          const doc: UploadedDocument = {
-            id: uniqueId,
-            fileName: relativePath, // Store relative path for folder structure
-            originalName: fileName,
-            mimeType: this.getMimeType(fileName),
-            size: stats.size,
-            path: filePath,
-            uploadedAt: stats.birthtime,
-            status: 'completed',
-          };
-          
-          this.documents.set(doc.id, doc);
-          loadedCount++;
-          this.logger.log(`📄 Loaded: ${relativePath}`);
-        }
-      }
-      
-      this.logger.log(`✅ Loaded ${loadedCount} new documents (total: ${this.documents.size})`);
-    } catch (error) {
-      this.logger.error('Failed to load documents from disk', error.stack);
-    }
-  }
-
-  /**
-   * Recursively get all files in a directory
-   */
-  private async getAllFilesRecursively(dir: string): Promise<string[]> {
-    const files: string[] = [];
-    
-    try {
-      const entries = await fs.readdir(dir, { withFileTypes: true });
-      
-      for (const entry of entries) {
-        // Skip hidden files/folders
-        if (entry.name.startsWith('.')) continue;
-        
-        const fullPath = path.join(dir, entry.name);
-        
-        if (entry.isDirectory()) {
-          // Recursively scan subdirectory
-          const subFiles = await this.getAllFilesRecursively(fullPath);
-          files.push(...subFiles);
-        } else if (entry.isFile()) {
-          // Check if it's a supported file type
-          if (this.isSupportedFileType(entry.name)) {
-            files.push(fullPath);
-          }
-        }
-      }
-    } catch (error) {
-      this.logger.error(`Error scanning directory ${dir}:`, error.message);
-    }
-    
-    return files;
-  }
-
-  /**
-   * Check if file type is supported
-   */
-  private isSupportedFileType(fileName: string): boolean {
-    const ext = path.extname(fileName).toLowerCase();
-    const supportedExtensions = ['.pdf', '.txt', '.doc', '.docx'];
-    return supportedExtensions.includes(ext);
   }
 
   /**
@@ -175,39 +88,88 @@ export class DocumentsService {
   /**
    * Upload and process a document
    */
-  async uploadDocument(file: Express.Multer.File): Promise<UploadedDocument> {
+  async uploadDocument(
+    file: Express.Multer.File,
+    folderId?: string,
+    userId?: string,
+  ): Promise<DocumentEntity> {
     try {
       this.validateFile(file);
 
-      const documentId = uuidv4();
+      // Validate folder exists if folderId is provided
+      if (folderId && userId) {
+        const folder = await this.folderRepository.findOne({
+          where: { id: folderId, userId },
+        });
+        if (!folder) {
+          throw new BadRequestException('Folder not found');
+        }
+      }
+
       const fileExtension = path.extname(file.originalname);
-      const fileName = `${documentId}${fileExtension}`;
-      const filePath = path.join(this.uploadDir, fileName);
+      const fileName = `${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
 
-      // Save file
+      // Create folder path if folderId is provided
+      let targetDir = this.uploadDir;
+      if (folderId) {
+        targetDir = path.join(this.uploadDir, folderId);
+        await fs.mkdir(targetDir, { recursive: true });
+      }
+
+      const filePath = path.join(targetDir, fileName);
+
+      // Save file to disk
       await fs.writeFile(filePath, file.buffer);
-      this.logger.log(`File saved: ${fileName}`);
+      this.logger.log(`File saved: ${fileName} in folder: ${folderId || 'root'}`);
 
-      const document: UploadedDocument = {
-        id: documentId,
+      // Create document entity
+      const document = this.documentRepository.create({
+        userId,
+        folderId: folderId || null,
         fileName,
         originalName: file.originalname,
+        filePath,
+        fileSize: file.size,
         mimeType: file.mimetype,
-        size: file.size,
-        path: filePath,
-        uploadedAt: new Date(),
         status: 'processing',
-      };
+      });
 
-      this.documents.set(documentId, document);
+      // Save to database
+      const savedDocument = await this.documentRepository.save(document);
+
+      // Update folder counts
+      if (folderId) {
+        await this.updateFolderCounts(folderId);
+      }
 
       // Process document asynchronously
-      this.processDocumentAsync(documentId, filePath, file.originalname, file.mimetype);
+      this.processDocumentAsync(savedDocument.id, filePath, file.originalname, file.mimetype);
 
-      return document;
+      return savedDocument;
     } catch (error) {
       this.logger.error('Failed to upload document', error.stack);
       throw error;
+    }
+  }
+
+  /**
+   * Update folder document count
+   */
+  private async updateFolderCounts(folderId: string): Promise<void> {
+    try {
+      const folder = await this.folderRepository.findOne({
+        where: { id: folderId },
+        relations: ['documents', 'children'],
+      });
+
+      if (folder) {
+        folder.documentCount = folder.documents?.length || 0;
+        folder.folderCount = folder.children?.length || 0;
+        await this.folderRepository.save(folder);
+        this.logger.log(`Updated folder counts: ${folder.name} (docs: ${folder.documentCount}, folders: ${folder.folderCount})`);
+      }
+    } catch (error) {
+      this.logger.error('Failed to update folder counts', error.stack);
     }
   }
 
@@ -228,19 +190,29 @@ export class DocumentsService {
         { uploadedDocumentId: documentId },
       );
 
-      const document = this.documents.get(documentId);
+      // Update document status in database
+      const document = await this.documentRepository.findOne({
+        where: { id: documentId },
+      });
+
       if (document) {
         document.status = result.status === 'success' ? 'completed' : 'failed';
-        this.documents.set(documentId, document);
+        await this.documentRepository.save(document);
       }
 
       this.logger.log(`Document processing completed: ${documentId} - ${result.status}`);
     } catch (error) {
       this.logger.error(`Failed to process document: ${documentId}`, error.stack);
-      const document = this.documents.get(documentId);
+
+      // Update status to failed in database
+      const document = await this.documentRepository.findOne({
+        where: { id: documentId },
+      });
+
       if (document) {
         document.status = 'failed';
-        this.documents.set(documentId, document);
+        document.errorMessage = error.message;
+        await this.documentRepository.save(document);
       }
     }
   }
@@ -248,10 +220,16 @@ export class DocumentsService {
   /**
    * Upload multiple documents
    */
-  async uploadMultipleDocuments(files: Express.Multer.File[]): Promise<UploadedDocument[]> {
-    this.logger.log(`Uploading ${files.length} documents`);
+  async uploadMultipleDocuments(
+    files: Express.Multer.File[],
+    folderId?: string,
+    userId?: string,
+  ): Promise<DocumentEntity[]> {
+    this.logger.log(`Uploading ${files.length} documents to folder: ${folderId || 'root'}`);
 
-    const results = await Promise.all(files.map((file) => this.uploadDocument(file)));
+    const results = await Promise.all(
+      files.map((file) => this.uploadDocument(file, folderId, userId)),
+    );
 
     return results;
   }
@@ -259,41 +237,66 @@ export class DocumentsService {
   /**
    * Get document by ID
    */
-  async getDocument(documentId: string): Promise<UploadedDocument | null> {
-    return this.documents.get(documentId) || null;
+  async getDocument(documentId: string): Promise<DocumentEntity | null> {
+    return this.documentRepository.findOne({
+      where: { id: documentId },
+      relations: ['folder'],
+    });
   }
 
   /**
-   * Get all documents
+   * Get all documents for a user
    */
-  async getAllDocuments(): Promise<UploadedDocument[]> {
-    // Reload from disk to ensure we have latest files
-    await this.loadDocumentsFromDisk();
-    return Array.from(this.documents.values());
+  async getAllDocuments(userId?: string): Promise<DocumentEntity[]> {
+    if (userId) {
+      return this.documentRepository.find({
+        where: { userId },
+        relations: ['folder'],
+        order: { uploadedAt: 'DESC' },
+      });
+    }
+
+    return this.documentRepository.find({
+      relations: ['folder'],
+      order: { uploadedAt: 'DESC' },
+    });
   }
 
   /**
    * Delete document
    */
-  async deleteDocument(documentId: string): Promise<void> {
+  async deleteDocument(documentId: string, userId?: string): Promise<void> {
     try {
-      const document = this.documents.get(documentId);
+      const where: any = { id: documentId };
+      if (userId) {
+        where.userId = userId;
+      }
+
+      const document = await this.documentRepository.findOne({ where });
+
       if (!document) {
         throw new BadRequestException('Document not found');
       }
 
+      const folderId = document.folderId;
+
       // Delete from vector store
       await this.ingestionService.deleteDocument(documentId);
 
-      // Delete file
+      // Delete file from disk
       try {
-        await fs.unlink(document.path);
+        await fs.unlink(document.filePath);
       } catch (error) {
-        this.logger.warn(`Failed to delete file: ${document.path}`);
+        this.logger.warn(`Failed to delete file: ${document.filePath}`);
       }
 
-      // Remove from memory
-      this.documents.delete(documentId);
+      // Remove from database
+      await this.documentRepository.remove(document);
+
+      // Update folder counts
+      if (folderId) {
+        await this.updateFolderCounts(folderId);
+      }
 
       this.logger.log(`Document deleted: ${documentId}`);
     } catch (error) {
@@ -308,9 +311,11 @@ export class DocumentsService {
   async reindexAllDocuments(userId: string): Promise<any> {
     try {
       this.logger.log('🔄 Starting re-indexing of all documents...');
-      
-      const allDocuments = Array.from(this.documents.values());
-      
+
+      const allDocuments = await this.documentRepository.find({
+        where: { userId },
+      });
+
       if (allDocuments.length === 0) {
         this.logger.warn('No documents to re-index');
         return {
@@ -331,34 +336,36 @@ export class DocumentsService {
       for (const document of allDocuments) {
         try {
           this.logger.log(`Re-indexing: ${document.originalName} (${document.id})`);
-          
+
           // Update status to processing
           document.status = 'processing';
-          this.documents.set(document.id, document);
+          await this.documentRepository.save(document);
 
           // Delete existing embeddings for this document
           await this.ingestionService.deleteDocument(document.id);
-          
+
           // Re-ingest the document
           await this.ingestionService.processDocument(
-            document.path,
+            document.filePath,
             document.originalName,
-            document.id
+            document.mimeType,
+            { uploadedDocumentId: document.id }
           );
 
           // Update status to completed
           document.status = 'completed';
-          this.documents.set(document.id, document);
-          
+          await this.documentRepository.save(document);
+
           reindexed++;
           this.logger.log(`✅ Re-indexed: ${document.originalName}`);
         } catch (error) {
           this.logger.error(`❌ Failed to re-index ${document.originalName}: ${error.message}`);
-          
+
           // Update status to failed
           document.status = 'failed';
-          this.documents.set(document.id, document);
-          
+          document.errorMessage = error.message;
+          await this.documentRepository.save(document);
+
           failed++;
           errors.push(`${document.originalName}: ${error.message}`);
         }
@@ -374,7 +381,7 @@ export class DocumentsService {
       };
 
       this.logger.log(`✅ Re-indexing completed: ${reindexed}/${allDocuments.length} successful`);
-      
+
       return result;
     } catch (error) {
       this.logger.error(`Failed to re-index documents: ${error.message}`, error.stack);
@@ -383,23 +390,23 @@ export class DocumentsService {
   }
 
   /**
-   * Reload documents from disk (public method)
-   */
-  async reloadDocumentsFromDisk(): Promise<void> {
-    this.logger.log('🔄 Reloading documents from disk...');
-    await this.loadDocumentsFromDisk();
-  }
-
-  /**
    * Get vector store statistics
    */
-  async getStats() {
+  async getStats(userId?: string) {
     const vectorStats = await this.vectorService.getStats();
+
+    const where: any = {};
+    if (userId) {
+      where.userId = userId;
+    }
+
+    const documents = await this.documentRepository.find({ where });
+
     return {
-      totalDocuments: this.documents.size,
+      totalDocuments: documents.length,
       totalChunks: vectorStats.count,
       collectionName: vectorStats.collectionName,
-      documents: Array.from(this.documents.values()).map((doc) => ({
+      documents: documents.map((doc) => ({
         id: doc.id,
         originalName: doc.originalName,
         status: doc.status,

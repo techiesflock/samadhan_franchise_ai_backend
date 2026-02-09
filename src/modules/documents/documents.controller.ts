@@ -11,6 +11,7 @@ import {
   HttpStatus,
   HttpCode,
   Logger,
+  Body,
 } from '@nestjs/common';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiConsumes, ApiBody } from '@nestjs/swagger';
@@ -39,14 +40,22 @@ export class DocumentsController {
           type: 'string',
           format: 'binary',
         },
+        folderId: {
+          type: 'string',
+          description: 'Optional folder ID to upload document to',
+        },
       },
     },
   })
   @ApiResponse({ status: 201, description: 'Document uploaded successfully' })
   @ApiResponse({ status: 400, description: 'Invalid file' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
-  async uploadDocument(@UploadedFile() file: Express.Multer.File) {
-    const document = await this.documentsService.uploadDocument(file);
+  async uploadDocument(
+    @UploadedFile() file: Express.Multer.File,
+    @Body('folderId') folderId?: string,
+    @CurrentUser('id') userId?: string,
+  ) {
+    const document = await this.documentsService.uploadDocument(file, folderId, userId);
     return {
       statusCode: HttpStatus.CREATED,
       message: 'Document uploaded successfully. Processing in background.',
@@ -69,14 +78,22 @@ export class DocumentsController {
             format: 'binary',
           },
         },
+        folderId: {
+          type: 'string',
+          description: 'Optional folder ID to upload documents to',
+        },
       },
     },
   })
   @ApiResponse({ status: 201, description: 'Documents uploaded successfully' })
   @ApiResponse({ status: 400, description: 'Invalid files' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
-  async uploadMultipleDocuments(@UploadedFiles() files: Express.Multer.File[]) {
-    const documents = await this.documentsService.uploadMultipleDocuments(files);
+  async uploadMultipleDocuments(
+    @UploadedFiles() files: Express.Multer.File[],
+    @Body('folderId') folderId?: string,
+    @CurrentUser('id') userId?: string,
+  ) {
+    const documents = await this.documentsService.uploadMultipleDocuments(files, folderId, userId);
     return {
       statusCode: HttpStatus.CREATED,
       message: `${documents.length} documents uploaded successfully. Processing in background.`,
@@ -88,8 +105,8 @@ export class DocumentsController {
   @ApiOperation({ summary: 'Get all documents' })
   @ApiResponse({ status: 200, description: 'Documents retrieved successfully' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
-  async getAllDocuments() {
-    const documents = await this.documentsService.getAllDocuments();
+  async getAllDocuments(@CurrentUser('id') userId: string) {
+    const documents = await this.documentsService.getAllDocuments(userId);
     return {
       statusCode: HttpStatus.OK,
       data: documents,
@@ -100,8 +117,8 @@ export class DocumentsController {
   @ApiOperation({ summary: 'Get document statistics' })
   @ApiResponse({ status: 200, description: 'Statistics retrieved successfully' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
-  async getStats() {
-    const stats = await this.documentsService.getStats();
+  async getStats(@CurrentUser('id') userId: string) {
+    const stats = await this.documentsService.getStats(userId);
     return {
       statusCode: HttpStatus.OK,
       data: stats,
@@ -127,8 +144,11 @@ export class DocumentsController {
   @ApiResponse({ status: 200, description: 'Document deleted successfully' })
   @ApiResponse({ status: 404, description: 'Document not found' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
-  async deleteDocument(@Param('id') id: string) {
-    await this.documentsService.deleteDocument(id);
+  async deleteDocument(
+    @Param('id') id: string,
+    @CurrentUser('id') userId: string,
+  ) {
+    await this.documentsService.deleteDocument(id, userId);
     return {
       statusCode: HttpStatus.OK,
       message: 'Document deleted successfully',

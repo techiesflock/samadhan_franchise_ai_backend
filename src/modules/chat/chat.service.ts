@@ -592,7 +592,7 @@ export class ChatService {
     let context = 'Relevant information from the knowledge base:\n\n';
 
     results.forEach((result, index) => {
-      context += `[Source ${index + 1} - ${result.metadata?.fileName || 'Unknown'}]\n`;
+      // Remove source numbering from context to keep responses clean
       context += `${result.content}\n\n`;
     });
 
