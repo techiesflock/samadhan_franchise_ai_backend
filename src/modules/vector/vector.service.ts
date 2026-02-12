@@ -183,21 +183,79 @@ export class VectorService implements OnModuleInit {
    * Delete documents by document ID
    */
   async deleteDocumentsByDocId(documentId: string): Promise<void> {
-    try {
-      // Get all documents with this documentId
-      const results = await this.collection.get({
-        where: { documentId },
-      });
+    if (!this.collection) {
+      this.logger.warn('ChromaDB collection not initialized - skipping deletion');
+      return;
+    }
 
-      if (results.ids && results.ids.length > 0) {
+    try {
+      this.logger.log(`Attempting to delete chunks for document: ${documentId}`);
+      
+      // Method 1: Try direct delete with where clause
+      try {
         await this.collection.delete({
-          ids: results.ids,
+          where: { documentId: documentId },
         });
-        this.logger.log(`Deleted ${results.ids.length} chunks for document ${documentId}`);
+        this.logger.log(`✅ Deleted chunks for document ${documentId} using where clause`);
+        return;
+      } catch (whereError) {
+        this.logger.warn(`Where clause delete failed: ${whereError.message}`);
       }
+
+      // Method 2: Get documents first, then delete by IDs
+      try {
+        const results = await this.collection.get({
+          where: { documentId: documentId },
+        });
+
+        if (results.ids && results.ids.length > 0) {
+          this.logger.log(`Found ${results.ids.length} chunks, deleting...`);
+          await this.collection.delete({
+            ids: results.ids,
+          });
+          this.logger.log(`✅ Deleted ${results.ids.length} chunks for document ${documentId}`);
+          return;
+        } else {
+          this.logger.log(`No chunks found for document ${documentId} - may already be deleted`);
+          return;
+        }
+      } catch (getError) {
+        this.logger.warn(`Get with where clause failed: ${getError.message}`);
+      }
+
+      // Method 3: Fallback - get all and filter locally
+      try {
+        this.logger.log(`Trying fallback method: fetching all documents...`);
+        const allDocs = await this.collection.get({});
+        
+        if (allDocs.ids && allDocs.metadatas) {
+          const idsToDelete = allDocs.ids.filter((id, index) => {
+            const metadata = allDocs.metadatas[index] as any;
+            return metadata && metadata.documentId === documentId;
+          });
+
+          if (idsToDelete.length > 0) {
+            await this.collection.delete({
+              ids: idsToDelete,
+            });
+            this.logger.log(`✅ Deleted ${idsToDelete.length} chunks (fallback method)`);
+            return;
+          } else {
+            this.logger.log(`No chunks found for document ${documentId} - may already be deleted`);
+            return;
+          }
+        }
+      } catch (fallbackError) {
+        this.logger.warn(`Fallback method also failed: ${fallbackError.message}`);
+      }
+
+      // If all methods fail, log warning but don't throw
+      this.logger.warn(`⚠️  Could not delete chunks for document ${documentId} - will add new chunks anyway`);
+      
     } catch (error) {
-      this.logger.error('Failed to delete documents from vector store', error.stack);
-      throw error;
+      // Catch any unexpected errors
+      this.logger.error(`Unexpected error during deletion: ${error.message}`);
+      this.logger.warn(`⚠️  Continuing without deletion - new embeddings will be added`);
     }
   }
 

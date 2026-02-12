@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { QACache } from '../entities/qa-cache.entity';
-import { GeminiService } from './gemini.service';
+import { AIService } from './ai.service';
 
 export interface CachedResponse {
   id: string;
@@ -29,7 +29,7 @@ export class QACacheService {
   constructor(
     @InjectRepository(QACache)
     private qaCacheRepository: Repository<QACache>,
-    private geminiService: GeminiService,
+    private aiService: AIService,
   ) {}
 
   /**
@@ -43,7 +43,7 @@ export class QACacheService {
       this.logger.log(`🔍 Searching cache for: "${question.substring(0, 50)}..."`);
 
       // Get question embedding
-      const questionEmbedding = await this.geminiService.generateEmbedding(question);
+      const questionEmbedding = await this.aiService.generateEmbedding(question);
 
       // Get all cached Q&A for this user (could optimize with pagination)
       const cachedItems = await this.qaCacheRepository.find({
@@ -123,7 +123,7 @@ export class QACacheService {
       this.logger.log(`💾 Saving to cache: "${question.substring(0, 50)}..."`);
 
       // Generate embedding for question
-      const embedding = await this.geminiService.generateEmbedding(question);
+      const embedding = await this.aiService.generateEmbedding(question);
 
       const cacheEntry = this.qaCacheRepository.create({
         userId,

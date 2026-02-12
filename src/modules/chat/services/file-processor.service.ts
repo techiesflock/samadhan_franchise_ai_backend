@@ -30,7 +30,7 @@ export class FileProcessorService {
     };
 
     try {
-      // Image files - store binary data for Gemini Vision
+      // Image files - store binary data for OpenAI Vision
       if (file.mimetype.startsWith('image/')) {
         result.imageData = file.buffer;
         this.logger.log(`Image file processed: ${file.originalname}`);

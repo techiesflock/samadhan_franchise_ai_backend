@@ -3,7 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { v4 as uuidv4 } from 'uuid';
-import { GeminiService, ChatMessage } from './services/gemini.service';
+import { AIService, ChatMessage } from './services/ai.service';
 import { QACacheService } from './services/qa-cache.service';
 import { VectorService, SearchResult } from '../vector/vector.service';
 import { FileProcessorService } from './services/file-processor.service';
@@ -62,7 +62,7 @@ export class ChatService {
     @InjectRepository(ChatSessionEntity)
     private sessionRepository: Repository<ChatSessionEntity>,
     private configService: ConfigService,
-    private geminiService: GeminiService,
+    private aiService: AIService,
     private qaCacheService: QACacheService,
     private vectorService: VectorService,
     private fileProcessorService: FileProcessorService,
@@ -85,8 +85,8 @@ export class ChatService {
         model
       } = request;
 
-      // Determine which model to use
-      const modelToUse = model || this.configService.get<string>('gemini.model');
+      // Determine which OpenAI model to use
+      const modelToUse = model || this.configService.get<string>('openai.model');
 
       if (!message || message.trim().length === 0) {
         throw new BadRequestException('Message cannot be empty');
@@ -170,12 +170,12 @@ export class ChatService {
           size: processedFile.size,
         };
         
-        // Handle image files with Gemini Vision
+        // Handle image files with AI Vision
         if (processedFile.imageData) {
-          this.logger.log('🖼️ Analyzing image with Gemini Vision...');
+          this.logger.log('🖼️ Analyzing image with AI Vision...');
           const imagePrompt = message || 'Please analyze this image and describe what you see in detail. Include any text, objects, patterns, colors, and relevant information.';
           
-          const imageAnalysis = await this.geminiService.analyzeImage(
+          const imageAnalysis = await this.aiService.analyzeImage(
             processedFile.imageData,
             processedFile.mimeType,
             imagePrompt,
@@ -236,7 +236,7 @@ export class ChatService {
 
       // Step 1: Generate embedding for the user's question
       this.logger.log('Generating query embedding...');
-      const queryEmbedding = await this.geminiService.generateEmbedding(enhancedMessage);
+      const queryEmbedding = await this.aiService.generateEmbedding(enhancedMessage);
 
       // Step 2: Retrieve relevant documents from vector store
       this.logger.log(`Searching for top ${topK} relevant documents...`);
@@ -264,20 +264,20 @@ export class ChatService {
       const history = includeHistory && session.history.length > 0 ? session.history : undefined;
 
       if (hasRelevantData) {
-        // Use RAG: Build context from retrieved documents
+        // RAG: Build context from retrieved documents and pass to AI
         const context = this.buildContext(searchResults);
-        this.logger.log(`✅ Using KNOWLEDGE BASE - Built context from ${searchResults.length} documents`);
+        this.logger.log(`✅ Using RAG - Built context from ${searchResults.length} documents`);
         this.logger.log(`📊 Best match score: ${maxScore.toFixed(4)}`);
+        this.logger.log(`🤖 Sending context + question to OpenAI... (Model: ${modelToUse})`);
 
-        // Generate response using context
-        this.logger.log(`🤖 Generating response with Gemini using Knowledge Base context... (Model: ${modelToUse})`);
-        answer = await this.geminiService.chat(message, context, history, undefined, modelToUse);
+        // Generate response using AI with context from knowledge base
+        answer = await this.aiService.chat(message, context, history, undefined, modelToUse);
         responseSource = 'knowledge_base';
       } else {
         // No relevant data in knowledge base - use AI to generate response
         this.logger.log(`❌ No relevant data in knowledge base (max score: ${maxScore.toFixed(4)}, threshold: ${this.relevanceThreshold})`);
         this.logger.log(`🧠 Generating pure AI response (will be saved to knowledge base)... (Model: ${modelToUse})`);
-        answer = await this.geminiService.chat(
+        answer = await this.aiService.chat(
           message,
           undefined, // No context
           history,
@@ -480,7 +480,7 @@ export class ChatService {
       const qaDocument = `Question: ${question}\n\nAnswer: ${answer}`;
 
       // Generate embedding for the Q&A
-      const embedding = await this.geminiService.generateEmbedding(qaDocument);
+      const embedding = await this.aiService.generateEmbedding(qaDocument);
 
       // Create document ID
       const documentId = `ai-qa-${uuidv4()}`;
@@ -546,17 +546,16 @@ export class ChatService {
 
       let response: string;
       
-      // Try flash-lite first, fallback to regular flash if it fails
+      // Generate suggestions using the AI service
       try {
-        response = await this.geminiService.generateCompletion(
+        response = await this.aiService.generateCompletion(
           prompt,
           { temperature: 0.7, maxTokens: 200 },
-          'gemini-2.5-flash-lite'
+          modelToUse
         );
-      } catch (liteError) {
-        this.logger.warn('Flash-lite unavailable, using regular flash for suggestions');
-        // Fallback to the model used for the main response
-        response = await this.geminiService.generateCompletion(
+      } catch (error) {
+        this.logger.warn('Could not generate suggestions, using main model');
+        response = await this.aiService.generateCompletion(
           prompt,
           { temperature: 0.7, maxTokens: 200 },
           modelToUse
@@ -582,6 +581,53 @@ export class ChatService {
   }
 
   /**
+   * Generate topic-based suggestions without AI call
+   * Uses metadata from search results to suggest related queries
+   */
+  private generateTopicSuggestions(results: SearchResult[]): string[] {
+    try {
+      const suggestions: string[] = [];
+      const uniqueSources = new Set<string>();
+
+      // Extract unique sources
+      results.forEach(result => {
+        if (result.metadata?.fileName) {
+          uniqueSources.add(result.metadata.fileName);
+        }
+      });
+
+      // Generate suggestions based on available sources
+      const sources = Array.from(uniqueSources).slice(0, 3);
+      
+      if (sources.length >= 1) {
+        suggestions.push(`What else is in ${sources[0]}?`);
+      }
+      if (sources.length >= 2) {
+        suggestions.push(`Tell me more about ${sources[1]}`);
+      }
+      if (sources.length >= 3) {
+        suggestions.push(`What's the difference between ${sources[0]} and ${sources[1]}?`);
+      }
+
+      // If we don't have enough source-based suggestions, add generic ones
+      if (suggestions.length < 3) {
+        suggestions.push('Can you explain this in more detail?');
+      }
+      if (suggestions.length < 3) {
+        suggestions.push('What are the key points?');
+      }
+      if (suggestions.length < 3) {
+        suggestions.push('Are there any examples?');
+      }
+
+      return suggestions.slice(0, 3);
+    } catch (error) {
+      this.logger.warn(`Could not generate topic suggestions: ${error.message}`);
+      return [];
+    }
+  }
+
+  /**
    * Build context string from search results
    */
   private buildContext(results: SearchResult[]): string {
@@ -597,6 +643,62 @@ export class ChatService {
     });
 
     return context;
+  }
+
+  /**
+   * Build direct answer from knowledge base without AI processing
+   * Returns formatted content from the most relevant documents
+   */
+  private buildDirectAnswer(question: string, results: SearchResult[]): string {
+    if (results.length === 0) {
+      return 'No relevant information found in the knowledge base.';
+    }
+
+    // Build a comprehensive answer from the top results
+    let answer = '';
+
+    // If we have high-scoring results, format them nicely
+    const topResults = results.filter(r => r.score >= this.relevanceThreshold);
+
+    if (topResults.length > 0) {
+      // Group by document/source for better organization
+      const sourceMap = new Map<string, SearchResult[]>();
+      
+      topResults.forEach(result => {
+        const source = result.metadata?.fileName || 'Knowledge Base';
+        if (!sourceMap.has(source)) {
+          sourceMap.set(source, []);
+        }
+        sourceMap.get(source)!.push(result);
+      });
+
+      // Format answer with sections by source
+      answer = `Based on the information in our knowledge base:\n\n`;
+      
+      let sectionNum = 1;
+      sourceMap.forEach((chunks, source) => {
+        if (sourceMap.size > 1) {
+          answer += `**From ${source}:**\n\n`;
+        }
+        
+        // Combine chunks from same source
+        chunks.forEach((chunk, idx) => {
+          answer += `${chunk.content}\n\n`;
+        });
+
+        sectionNum++;
+      });
+
+      // Add a summary line if multiple sources
+      if (sourceMap.size > 1) {
+        answer += `\n---\n\n*Information compiled from ${sourceMap.size} source(s) in the knowledge base.*`;
+      }
+    } else {
+      // Fallback: Just return the best match
+      answer = `Based on our knowledge base:\n\n${results[0].content}`;
+    }
+
+    return answer.trim();
   }
 
   /**
@@ -618,7 +720,8 @@ export class ChatService {
     
     return {
       status: 'ok',
-      geminiConfigured: this.geminiService.isConfigured(),
+      aiProvider: this.aiService.getProvider(),
+      aiConfigured: this.aiService.isConfigured(),
       activeSessions: sessionCount,
       vectorStore: {
         totalChunks: vectorStats.count,

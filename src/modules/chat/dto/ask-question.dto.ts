@@ -1,58 +1,65 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsOptional, IsBoolean, IsInt, Min, Max, MinLength, IsEnum } from 'class-validator';
+import { ApiProperty } from '@nestjs/swagger';
+import { IsString, IsNotEmpty, IsOptional, IsEnum, IsBoolean, IsNumber, Min, Max } from 'class-validator';
 
-export enum GeminiModel {
-  FLASH = 'gemini-2.5-flash',
-  PRO = 'gemini-2.5-pro',
-  FLASH_LITE = 'gemini-2.5-flash-lite',
+export enum OpenAIModel {
+  GPT_4O_MINI = 'gpt-4o-mini',
+  GPT_4O = 'gpt-4o',
+  GPT_4_TURBO = 'gpt-4-turbo',
+  GPT_35_TURBO = 'gpt-3.5-turbo',
 }
 
 export class AskQuestionDto {
   @ApiProperty({
-    description: 'The question to ask the AI assistant',
-    example: 'What is the return policy for electronics?',
+    description: 'The question or message to ask',
+    example: 'What is the capital of France?',
   })
   @IsString()
-  @MinLength(1, { message: 'Message cannot be empty' })
+  @IsNotEmpty({ message: 'Message cannot be empty' })
   message: string;
 
-  @ApiPropertyOptional({
-    description: 'Session ID for continuing a conversation',
+  @ApiProperty({
+    description: 'Session ID to continue conversation (optional)',
     example: '123e4567-e89b-12d3-a456-426614174000',
+    required: false,
   })
-  @IsOptional()
   @IsString()
+  @IsOptional()
   sessionId?: string;
 
-  @ApiPropertyOptional({
-    description: 'Include conversation history in the context',
+  @ApiProperty({
+    description: 'Whether to include conversation history in context',
+    example: true,
     default: true,
+    required: false,
   })
-  @IsOptional()
   @IsBoolean()
+  @IsOptional()
   includeHistory?: boolean;
 
-  @ApiPropertyOptional({
-    description: 'Number of relevant documents to retrieve',
+  @ApiProperty({
+    description: 'Number of relevant documents to retrieve from knowledge base',
+    example: 5,
     default: 5,
     minimum: 1,
     maximum: 20,
+    required: false,
   })
+  @IsNumber()
   @IsOptional()
-  @IsInt()
   @Min(1)
   @Max(20)
   topK?: number;
 
-  @ApiPropertyOptional({
-    description: 'AI model to use for this request',
-    enum: GeminiModel,
-    example: GeminiModel.FLASH,
-    default: GeminiModel.FLASH,
+  @ApiProperty({
+    description: 'OpenAI model to use for chat completion',
+    enum: OpenAIModel,
+    example: OpenAIModel.GPT_4O_MINI,
+    default: OpenAIModel.GPT_4O_MINI,
+    required: false,
+  })
+  @IsEnum(OpenAIModel, {
+    message: 'Model must be one of: gpt-4o-mini, gpt-4o, gpt-4-turbo, gpt-3.5-turbo',
   })
   @IsOptional()
-  @IsEnum(GeminiModel, {
-    message: 'Model must be one of: gemini-2.5-flash, gemini-2.5-pro, gemini-2.5-flash-lite',
-  })
-  model?: GeminiModel;
+  model?: OpenAIModel;
 }

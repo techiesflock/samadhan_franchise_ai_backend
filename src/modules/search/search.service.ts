@@ -4,7 +4,7 @@ import { Repository, In, IsNull } from 'typeorm';
 import { DocumentEntity } from '../../entities/document.entity';
 import { FolderEntity } from '../../entities/folder.entity';
 import { VectorService } from '../vector/vector.service';
-import { GeminiService } from '../chat/services/gemini.service';
+import { AIService } from '../chat/services/ai.service';
 import { SearchDocumentsDto } from '../folders/dto/search-documents.dto';
 
 export interface SearchResult {
@@ -24,7 +24,7 @@ export class SearchService {
     @InjectRepository(FolderEntity)
     private folderRepository: Repository<FolderEntity>,
     private vectorService: VectorService,
-    private geminiService: GeminiService,
+    private aiService: AIService,
   ) {}
 
   /**
@@ -118,7 +118,7 @@ export class SearchService {
   ): Promise<{ documents: DocumentEntity[]; relevanceScore: number }> {
     try {
       // Generate embedding for query
-      const queryEmbedding = await this.geminiService.generateEmbedding(query);
+      const queryEmbedding = await this.aiService.generateEmbedding(query);
       
       // Perform vector search using ChromaDB
       const vectorResults = await this.vectorService.search(queryEmbedding, limit);
@@ -235,7 +235,7 @@ export class SearchService {
 Suggest 3 alternative search terms or categories they might want to try. 
 Return only the suggestions as a JSON array of strings.`;
 
-        const response = await this.geminiService.generateCompletion(prompt);
+        const response = await this.aiService.generateCompletion(prompt);
         return this.parseSuggestions(response);
       }
 
@@ -245,7 +245,7 @@ Return only the suggestions as a JSON array of strings.`;
 Suggest 3 related search terms they might be interested in.
 Return only the suggestions as a JSON array of strings.`;
 
-      const response = await this.geminiService.generateCompletion(prompt);
+      const response = await this.aiService.generateCompletion(prompt);
       return this.parseSuggestions(response);
     } catch (error) {
       this.logger.error('Failed to generate suggestions', error.stack);

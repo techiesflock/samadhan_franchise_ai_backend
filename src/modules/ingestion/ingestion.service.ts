@@ -5,7 +5,7 @@ import pdfParse from 'pdf-parse';
 import * as fs from 'fs/promises';
 import { v4 as uuidv4 } from 'uuid';
 import { VectorService, DocumentChunk } from '../vector/vector.service';
-import { GeminiService } from '../chat/services/gemini.service';
+import { AIService } from '../chat/services/ai.service';
 
 export interface ProcessedDocument {
   documentId: string;
@@ -25,7 +25,7 @@ export class IngestionService {
   constructor(
     private configService: ConfigService,
     private vectorService: VectorService,
-    private geminiService: GeminiService,
+    private aiService: AIService,
   ) {
     this.chunkSize = this.configService.get<number>('ingestion.chunkSize');
     this.chunkOverlap = this.configService.get<number>('ingestion.chunkOverlap');
@@ -86,7 +86,7 @@ export class IngestionService {
 
       // Generate embeddings for all chunks
       this.logger.log('Generating embeddings...');
-      const embeddings = await this.geminiService.generateEmbeddings(
+      const embeddings = await this.aiService.generateEmbeddings(
         documentChunks.map((chunk) => chunk.content),
       );
 
@@ -151,7 +151,7 @@ export class IngestionService {
 
       // Generate embeddings for all chunks
       this.logger.log('Generating embeddings...');
-      const embeddings = await this.geminiService.generateEmbeddings(
+      const embeddings = await this.aiService.generateEmbeddings(
         documentChunks.map((chunk) => chunk.content),
       );
 
@@ -244,7 +244,9 @@ export class IngestionService {
       this.logger.log(`Deleted document: ${documentId}`);
     } catch (error) {
       this.logger.error(`Failed to delete document: ${documentId}`, error.stack);
-      throw error;
+      // Don't throw - log warning and continue
+      // This allows re-indexing to proceed even if old chunks can't be deleted
+      this.logger.warn(`Continuing despite deletion error - new embeddings will be added`);
     }
   }
 }
